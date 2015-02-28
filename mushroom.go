@@ -7,12 +7,13 @@ import (
 	"strings"
 	"bytes"
 	"io"
+	"path"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync/atomic"
-	"github.com/gorilla/mux"
+	_"github.com/gorilla/mux"
 	"github.com/golang/groupcache"
 	"github.com/ha/doozer"
 	"html/template"
@@ -21,7 +22,7 @@ import (
 
 
 var (
-	cacheAddr     = flag.String("cache", "127.0.0.1:8000", "Address for groupcache")
+	// cacheAddr     = flag.String("cache", "127.0.0.1:8000", "Address for groupcache")
 	listenAddr    = flag.String("listen", "localhost:4000", "Address to listen on")
 	doozerAddr    = flag.String("doozer", "127.0.0.1:8046", "Doozerd Config Server")
 	imageSrc      = flag.String("imageSrc", "img/", "Directory with images to serve")
@@ -56,7 +57,7 @@ func main() {
 	defer d.Close()
 
 	// Setup the cache.
-	pool = groupcache.NewHTTPPool("http://" + *cacheAddr)
+	pool = groupcache.NewHTTPPool("http://" + *listenAddr)
 	imgCache = groupcache.NewGroup("img", 64<<20, groupcache.GetterFunc(
 			func (ctx groupcache.Context, key string, dest groupcache.Sink) error {
 				img, err := query(key)
@@ -83,8 +84,13 @@ func main() {
 	// Start watching for changes and signals.
 	go watch(d)
 
+	// Add the handler for definition requests and then start the
+	// server.
+	http.Handle("/images/", http.HandlerFunc(imgHandler))
+	log.Println(http.ListenAndServe(*listenAddr, nil))
+
 	// setup the router
-	router := mux.NewRouter()
+	/*router := mux.NewRouter()
 	router.HandleFunc("/", rootHandler)
 	router.HandleFunc(imgHandlePath, imgHandler)
 
@@ -93,7 +99,7 @@ func main() {
 	if httpErr != nil {
 		log.Fatal(httpErr)
 	}
-
+*/
 }
 
 // watch updates the peer list of servers based on changes to the
@@ -114,7 +120,7 @@ func watch(d *doozer.Conn) {
 	}
 
 	// Add myself to the list.
-	peers = append(peers, "http://" + *cacheAddr)
+	peers = append(peers, "http://" + *listenAddr)
 	rev, err = d.Set(peerFile, rev,
 		[]byte(strings.Join(peers, " ")))
 	if err != nil {
@@ -122,7 +128,7 @@ func watch(d *doozer.Conn) {
 		return
 	}
 	pool.Set(peers...)
-	log.Println("added myself to the peer list.")
+	log.Println("added myself to the peer list, Current Peers: ", peers)
 
 	// Setup signal handling to deal with ^C and others.
 	sigs := make(chan os.Signal, 1)
@@ -136,7 +142,7 @@ func watch(d *doozer.Conn) {
 		case <- sigs:
 			// Remove ourselves from the peer list and exit.
 			for i, peer := range peers {
-				if peer == "http://" + *cacheAddr {
+				if peer == "http://" + *listenAddr {
 					peers = append(peers[:i], peers[i+1:]...)
 					d.Set(peerFile, rev, []byte(strings.Join(peers, " ")))
 					log.Println("removed myself from peer list before exiting.")
@@ -182,9 +188,12 @@ func wait(d *doozer.Conn, file string, rev *int64) chan []string {
 
 func imgHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("received request:", r.Method, r.URL.Path)
+	imgFile := strings.Trim(path.Base(r.URL.Path), "/")
 
+	/*
 	reqVars := mux.Vars(r)
 	imgFile := reqVars["imgFile"]
+	*/
 
 	width := r.URL.Query().Get("width")
 	if len(width) == 0 {

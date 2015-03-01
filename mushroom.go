@@ -12,12 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
+	_"sync/atomic"
 	_"github.com/gorilla/mux"
 	"github.com/golang/groupcache"
-	"github.com/ha/doozer"
+	_"github.com/ha/doozer"
 	"html/template"
 	"github.com/disintegration/imaging"
+	"github.com/alexanderbartels/mushroom/distributed"
 )
 
 
@@ -26,11 +27,13 @@ var (
 	listenAddr    = flag.String("listen", "localhost:4000", "Address to listen on")
 	doozerAddr    = flag.String("doozer", "127.0.0.1:8046", "Doozerd Config Server")
 	imageSrc      = flag.String("imageSrc", "img/", "Directory with images to serve")
-	imgHandlePath = "/images/{imgFile}"
 
 	// This is our groupcache stuff.
 	pool     *groupcache.HTTPPool
 	imgCache *groupcache.Group
+
+	// save the current active list of caching peers
+	cachingPeers    []string
 
 	rootTemplate  = template.Must(template.New("root").Parse(`
 		<!DOCTYPE html>
@@ -49,12 +52,13 @@ func main() {
 	// parse the command line flags
 	flag.Parse()
 
-	// Setup the doozer connection.
-	d, err := doozer.Dial(*doozerAddr)
+	// setup distributed configuration
+	dc, err := distributed.NewConfig(*doozerAddr)
 	if err != nil {
-		log.Fatalf("connecting to doozer: %v\n", err)
+		log.Fatalf("connecting to distributed config (doozer): %v\n", err)
 	}
-	defer d.Close()
+	defer dc.Close()
+
 
 	// Setup the cache.
 	pool = groupcache.NewHTTPPool("http://" + *listenAddr)
@@ -81,109 +85,75 @@ func main() {
 	 *
 	 */
 
-	// Start watching for changes and signals.
-	go watch(d)
+	// create channels to listen on for new updates
+	cachingPeerUpdates := handleCachingPeers(&dc)
+	signalingUpdates   := handleSignaling()
+
+	// handle the different channels
+	go handleUpdates(&dc, cachingPeerUpdates, signalingUpdates)
+
+	// write initial caching peers to the update channel, so that the update func will setup the initial CachePool
+	cachingPeerUpdates <- cachingPeers
 
 	// Add the handler for definition requests and then start the
 	// server.
 	http.Handle("/images/", http.HandlerFunc(imgHandler))
 	log.Println(http.ListenAndServe(*listenAddr, nil))
+}
 
-	// setup the router
-	/*router := mux.NewRouter()
-	router.HandleFunc("/", rootHandler)
-	router.HandleFunc(imgHandlePath, imgHandler)
+// Setup signal handling to deal with ^C and others.
+func handleSignaling() chan os.Signal {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, os.Kill)
 
-	http.Handle("/", router)
-	httpErr := http.ListenAndServe(*listenAddr, nil)
-	if httpErr != nil {
-		log.Fatal(httpErr)
-	}
-*/
+	return sigs
+}
+
+func handleCachingPeers(dc *distributed.Config) chan []string {
+	// fetch the initial configuration.
+	cachingPeers = distributed.FetchConfigItem(dc, "/cachingPeers")
+	log.Println("Initial caching peers fetched: ", strings.Join(cachingPeers, " "))
+
+	// add myself to the list
+	cachingPeers = append(cachingPeers, "http://" + *listenAddr)
+	distributed.SetConfigItem(dc, "/cachingPeers", cachingPeers)
+	log.Println("Added myself to the active caching peers. Current Peers: ", cachingPeers)
+
+	// create channel to watching for changes on "CachingPeers"
+	cachingPeerUpdates := distributed.WatchConfig(dc, "/cachingPeers")
+	return cachingPeerUpdates
 }
 
 // watch updates the peer list of servers based on changes to the
 // doozer configuration or signals from the OS.
-func watch(d *doozer.Conn) {
-	peerFile := "/peers"
-	var peers []string
-	var rev int64
-
-	// Run the initial get.
-	data, rev, err := d.Get(peerFile, nil)
-	if err != nil {
-		log.Println("initial peer list get:", err)
-		log.Println("using empty set to start")
-		peers = []string{}
-	} else {
-		peers = strings.Split(string(data), " ")
-	}
-
-	// Add myself to the list.
-	peers = append(peers, "http://" + *listenAddr)
-	rev, err = d.Set(peerFile, rev,
-		[]byte(strings.Join(peers, " ")))
-	if err != nil {
-		log.Println("unable to add myself to the peer list (no longer watching).")
-		return
-	}
-	pool.Set(peers...)
-	log.Println("added myself to the peer list, Current Peers: ", peers)
-
-	// Setup signal handling to deal with ^C and others.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, os.Kill)
-
-	// Get the channel that's listening for changes.
-	updates := wait(d, peerFile, &rev)
-
+func handleUpdates(dc *distributed.Config, cachingPeerUpdates chan []string, signalingUpdates chan os.Signal) {
 	for {
 		select {
-		case <- sigs:
+		case <- signalingUpdates:
 			// Remove ourselves from the peer list and exit.
-			for i, peer := range peers {
+			for i, peer := range cachingPeers {
 				if peer == "http://" + *listenAddr {
-					peers = append(peers[:i], peers[i+1:]...)
-					d.Set(peerFile, rev, []byte(strings.Join(peers, " ")))
-					log.Println("removed myself from peer list before exiting.")
+					// remove myself from the cachingPeers
+					cachingPeers = append(cachingPeers[:i], cachingPeers[i+1:]...)
+					distributed.SetConfigItem(dc, "/cachingPeers", cachingPeers)
+					log.Println("Removed myself from caching peers before exiting.")
 				}
 			}
 			os.Exit(1)
-		case update, ok := <-updates:
+		case update, ok := <-cachingPeerUpdates:
 			// If the channel was closed, we should stop selecting on it.
 			if !ok {
-				updates = nil
+				log.Println("Channel for active caching peers was closed. Stop Watching on it.")
+				cachingPeerUpdates = nil
 				continue
 			}
 
 			// Otherwise, update the peer list.
-			peers = update
-			log.Println("got new peer list:", strings.Join(peers, " "))
-			pool.Set(peers...)
+			cachingPeers = update
+			log.Println("Got new caching peers:", strings.Join(cachingPeers, " "))
+			pool.Set(cachingPeers...)
 		}
 	}
-}
-
-func wait(d *doozer.Conn, file string, rev *int64) chan []string {
-	c := make(chan []string, 1)
-	cur := *rev
-	go func() {
-		for {
-			// Wait for the change.
-			e, err := d.Wait(file, cur+1)
-			if err != nil {
-				log.Println("waiting failed (no longer watching):", err)
-				close(c)
-				return
-			}
-			// Update the revision and send the change on the channel.
-			atomic.CompareAndSwapInt64(rev, cur, e.Rev)
-			cur = e.Rev
-			c <- strings.Split(string(e.Body), " ")
-		}
-	}()
-
-	return c
 }
 
 func imgHandler(w http.ResponseWriter, r *http.Request) {

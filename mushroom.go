@@ -19,6 +19,7 @@ import (
 	"html/template"
 	"github.com/disintegration/imaging"
 	"github.com/alexanderbartels/mushroom/distributed"
+	"github.com/alexanderbartels/mushroom/keys"
 )
 
 
@@ -157,41 +158,13 @@ func handleUpdates(dc *distributed.Config, cachingPeerUpdates chan []string, sig
 }
 
 func imgHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("received request:", r.Method, r.URL.Path)
+	log.Println("Request received:", r.Method, r.URL.Path)
+
 	imgFile := strings.Trim(path.Base(r.URL.Path), "/")
+	imgKey  := keys.Generate(imgFile, r.URL.Query())
+	log.Println("Generated Key from Request:", imgKey)
 
-	/*
-	reqVars := mux.Vars(r)
-	imgFile := reqVars["imgFile"]
-	*/
-
-	width := r.URL.Query().Get("width")
-	if len(width) == 0 {
-		width = "0"
-	}
-
-	widthAsInt, wErr := strconv.Atoi(width)
-	if wErr != nil || widthAsInt < 0 {
-		log.Println("Invalid Width specified ", widthAsInt, " - ", wErr)
-		widthAsInt = 0;
-	}
-
-	height := r.URL.Query().Get("height")
-	if len(height) == 0 {
-		height = "0"
-	}
-
-	heightAsInt, hErr := strconv.Atoi(height)
-	if hErr != nil || heightAsInt < 0 {
-		log.Println("Invalid Width specified ", heightAsInt, " - ", hErr)
-		heightAsInt = 0;
-	}
-
-	// img key generation
-	imgKey := imgFile + "?width=" + strconv.Itoa(widthAsInt) + "&height=" + strconv.Itoa(heightAsInt)
-	log.Println("Try retreiving image from cache. Key:", imgKey)
-
-	// Get the image from groupcache and write it out.
+	// Get the image from cache and write it out.
 	var data []byte
 	err := imgCache.Get(nil, imgKey, groupcache.AllocatingByteSliceSink(&data))
 	if err != nil {

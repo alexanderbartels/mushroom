@@ -12,13 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	_"sync/atomic"
-	_"github.com/gorilla/mux"
 	"github.com/golang/groupcache"
-	_"github.com/ha/doozer"
 	"html/template"
 	"github.com/disintegration/imaging"
 	"github.com/alexanderbartels/mushroom/distributed"
+	"github.com/alexanderbartels/mushroom/mgmt"
 )
 
 
@@ -95,9 +93,10 @@ func main() {
 	// write initial caching peers to the update channel, so that the update func will setup the initial CachePool
 	cachingPeerUpdates <- cachingPeers
 
-	// Add the handler for definition requests and then start the
-	// server.
+	// Add the handler for image requests and then start the server.
 	http.Handle("/images/", http.HandlerFunc(imgHandler))
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
+	http.Handle("/mgmt/stats/caching", http.HandlerFunc(mgmt.NewCachingStatsHandler(imgCache)))
 	log.Println(http.ListenAndServe(*listenAddr, nil))
 }
 

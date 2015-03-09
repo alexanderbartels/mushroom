@@ -7,6 +7,10 @@ import (
 	"github.com/alexanderbartels/flux"
 )
 
+const (
+	FILE_NAME = "fileName"
+)
+
 var (
 	allowedRequestParams = []string{
 		"width",
@@ -22,7 +26,24 @@ var (
 		"height": validatePositiveInteger,
 		"dpi": validatePositiveInteger,
 	}
+
+		keyParser *flux.Flux
+		keyParserInit = false
 )
+
+func getKeyParser() *flux.Flux {
+	if !keyParserInit {
+		keyParser = flux.NewFlux().NamedGroup("fileName", "[^/\\?#&\\s]*").Then(nameParamSep)
+		for i, name := range allowedRequestParams {
+			if i > 0 {
+				keyParser.Then(paramSep)
+			}
+			keyParser.Then(name).Then(assigment).NamedGroup(name, "[^/\\?#&\\s]*")
+		}
+		keyParserInit = true
+	}
+	return keyParser
+}
 
 func validatePositiveInteger(value string) bool {
 	valAsInt, err := strconv.Atoi(value)
@@ -36,11 +57,12 @@ func validateParam(param, value string) bool {
 	return paramValidationFuncs[param](value)
 }
 
-func getValueByName(params map[string]string, name string) string {
+func getValueByName(params map[string][]string, name string) string {
 	if val, ok := params[name]; ok {
-		if ok = validateParam(name, val); ok {
+		firstVal := val[0]
+		if ok = validateParam(name, firstVal); ok {
 			// if param is available and valid, we can use it
-			return val
+			return firstVal
 		}
 	}
 
@@ -54,7 +76,7 @@ func getValueByName(params map[string]string, name string) string {
 // creates a Key for the cache like an URL,
 // but only the allowed request params are included
 // example: test.jpg?width=500&height=300
-func Generate(fileName string, params map[string]string) string {
+func Generate(fileName string, params map[string][]string) string {
 	var buffer bytes.Buffer
 
 	buffer.WriteString(fileName)
@@ -73,6 +95,6 @@ func Generate(fileName string, params map[string]string) string {
 	return buffer.String()
 }
 
-func Parse(key string) (fileName string, params map[string]string) {
-	// TODO regex to parse the key efficiently
+func Parse(key string) (map[string]string, error) {
+	return getKeyParser().NamedMatches(key)
 }

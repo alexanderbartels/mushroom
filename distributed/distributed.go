@@ -1,10 +1,19 @@
 package distributed
 
 import (
+	"fmt"
 	"log"
+	"flag"
 	"strings"
 	"sync/atomic"
 	"github.com/ha/doozer"
+	"github.com/golang/groupcache"
+	"github.com/alexanderbartels/mushroom/keys"
+	"github.com/alexanderbartels/mushroom/image"
+)
+
+var (
+	imageSrc      = flag.String("imageSrc", "img/", "Directory with images to serve")
 )
 
 type Config struct {
@@ -83,4 +92,39 @@ func NewConfig(addr string) (Config, error) {
 	}
 
 	return Config{d, 0}, nil
+}
+
+func CacheItemProvider(ctx groupcache.Context, key string, dest groupcache.Sink) error {
+	// parse the key
+	captures, err := keys.Parse(key)
+	if err != nil {
+		err = fmt.Errorf("Querying image (parse key): %v", err)
+		log.Println(err)
+		return err
+	}
+
+	// read image with the file provider
+	imgProvider := image.FileProvider{}
+	imgProvider.Src = *imageSrc + captures[keys.FILE_NAME]
+	img, loadingErr := imgProvider.Provide()
+	if loadingErr != nil {
+		loadingErr = fmt.Errorf("Querying image (load image): %v", loadingErr)
+		log.Println(loadingErr)
+		return loadingErr
+	}
+
+	// process the image
+	imgProcessor := image.DefaultProcessor{}
+	imgProcessor.Img = &img
+	buf, processErr := imgProcessor.Process(captures)
+	if processErr != nil {
+		processErr = fmt.Errorf("Querying image (process image): %v", processErr)
+		log.Println(processErr)
+		return processErr
+	}
+
+	log.Println("Querying image: successful with key =", key)
+	// image loading and processing successful -> write it to the cache
+	dest.SetBytes(buf.Bytes())
+	return nil
 }

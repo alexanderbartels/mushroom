@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"strconv"
 	"flag"
 	"strings"
 	"bytes"
@@ -12,12 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	_"sync/atomic"
-	_"github.com/gorilla/mux"
 	"github.com/golang/groupcache"
-	_"github.com/ha/doozer"
 	"html/template"
-	"github.com/disintegration/imaging"
 	"github.com/alexanderbartels/mushroom/distributed"
 	"github.com/alexanderbartels/mushroom/keys"
 )
@@ -27,7 +21,6 @@ var (
 	// cacheAddr     = flag.String("cache", "127.0.0.1:8000", "Address for groupcache")
 	listenAddr    = flag.String("listen", "localhost:4000", "Address to listen on")
 	doozerAddr    = flag.String("doozer", "127.0.0.1:8046", "Doozerd Config Server")
-	imageSrc      = flag.String("imageSrc", "img/", "Directory with images to serve")
 
 	// This is our groupcache stuff.
 	pool     *groupcache.HTTPPool
@@ -63,19 +56,8 @@ func main() {
 
 	// Setup the cache.
 	pool = groupcache.NewHTTPPool("http://" + *listenAddr)
-	imgCache = groupcache.NewGroup("img", 64<<20, groupcache.GetterFunc(
-			func (ctx groupcache.Context, key string, dest groupcache.Sink) error {
-				img, err := query(key)
-				if err != nil {
-					err = fmt.Errorf("querying image: %v", err)
-					log.Println(err)
-					return err
-				}
+	imgCache = groupcache.NewGroup("img", 64<<20, groupcache.GetterFunc(distributed.CacheItemProvider))
 
-				log.Println("retrieved image for", key)
-				dest.SetBytes(img)
-				return nil
-			}))
 
 	/**
 	 * Neue CahceGroup 'grayscaleImgs' wenn als param ?action=grayscale angehaengt wird
@@ -179,47 +161,4 @@ func imgHandler(w http.ResponseWriter, r *http.Request) {
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	rootTemplate.Execute(w, listenAddr)
-}
-
-func query(key string) ([]byte, error) {
-	// split key
-	splitted := strings.Split(key, "?")
-	log.Println("Reading image from disk: ", splitted[0])
-
-	// split into array of params
-	params := strings.Split(splitted[1], "&")
-
-	var height int
-	var width  int
-
-	for _, v := range params {
-
-		keyValueParam := strings.Split(v, "=")
-
-		switch {
-		case strings.EqualFold("width", keyValueParam[0]):
-			width, _ = strconv.Atoi(keyValueParam[1])
-		case strings.EqualFold("height", keyValueParam[0]):
-			height, _ = strconv.Atoi(keyValueParam[1])
-		default:
-			log.Println("Unsupported Param for Image: ", keyValueParam[0])
-		}
-	}
-
-	// read image
-	dstimg, err := imaging.Open(*imageSrc + splitted[0])
-	if err != nil {
-		return nil, err
-	}
-
-	// manipulate image
-	if width > 0 || height > 0 {
-		dstimg = imaging.Resize(dstimg, width, height, imaging.Box)
-	}
-
-	// write image
-	buf := new(bytes.Buffer)
-	encodeErr := imaging.Encode(buf, dstimg, imaging.PNG)
-
-	return buf.Bytes(), encodeErr
 }
